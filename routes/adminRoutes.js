@@ -9,9 +9,15 @@ router.get('/posts', authenticateAdmin, adminController.getPosts);
 router.delete('/posts/:id', authenticateAdmin, adminController.deletePost);
 router.get('/users', authenticateAdmin, adminController.getUsers);
 router.delete('/users/:id', authenticateAdmin, adminController.deleteUser);
-router.post('/users', authenticateAdmin, adminController.addUser);
-router.put('/users/:id/role', authenticateAdmin, adminController.updateUserRole);
-router.put('/make-admin/:username', adminController.makeAdmin);
+router.put('/make-admin/:username', authenticateAdmin, adminController.makeAdmin);
+router.put('/remove-admin/:username', authenticateAdmin, adminController.removeAdmin);
+
+router.get('/settings', authenticateAdmin, adminController.getSettings);
+router.post('/settings', authenticateAdmin, adminController.updateSetting);
+
+router.get('/doctors', authenticateAdmin, adminController.getDoctorsAdmin);
+router.post('/doctors', authenticateAdmin, adminController.addDoctor);
+router.put('/doctors/:id', authenticateAdmin, adminController.updateDoctor);
+router.delete('/doctors/:id', authenticateAdmin, adminController.deleteDoctor);
 
 module.exports = router;
-
