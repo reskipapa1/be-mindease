@@ -5,11 +5,15 @@ import numpy as np
 import pandas as pd
 import joblib
 from fastapi.middleware.cors import CORSMiddleware
-from google import genai as google_genai
+import os
+from groq import Groq
 
-# Setup Gemini API
-gemini_client = google_genai.Client(api_key="AIzaSyC7VyUNyxyZROtBaw1DBVq0TWf6Cyc5L88")
-GEMINI_MODEL = "models/gemini-2.5-flash"
+from dotenv import load_dotenv
+load_dotenv()
+
+# Setup Groq API
+groq_client = Groq(api_key=os.environ.get("GROQ_API_KEY"))
+GROQ_MODEL = "llama-3.3-70b-versatile"
 
 app = FastAPI(title="MindEase AI API")
 
@@ -109,7 +113,7 @@ def predict(data: HealthData):
     risk_labels = ['High', 'Low', 'Medium']
     risk_level = risk_labels[risk_idx]
     
-    # Memanggil Gemini untuk rekomendasi yang lebih natural dan manusiawi
+    # Memanggil Groq Llama untuk rekomendasi yang lebih natural dan manusiawi
     try:
         level_map = {'High': 'tinggi', 'Medium': 'sedang', 'Low': 'rendah'}
         level_indo = level_map.get(risk_level, risk_level)
@@ -122,11 +126,19 @@ def predict(data: HealthData):
             f"Langsung sapa jiwanya seolah kamu sudah mendengar semua ceritanya. "
             f"Gunakan bahasa Indonesia yang santai, bukan formal."
         )
-        response = gemini_client.models.generate_content(
-            model=GEMINI_MODEL,
-            contents=prompt
+        
+        chat_completion = groq_client.chat.completions.create(
+            messages=[
+                {
+                    "role": "user",
+                    "content": prompt,
+                }
+            ],
+            model=GROQ_MODEL,
+            temperature=0.7,
+            max_tokens=256,
         )
-        ai_recommendation = response.text.strip()
+        ai_recommendation = chat_completion.choices[0].message.content.strip()
     except Exception as e:
         ai_recommendation = "Apa pun yang sedang kamu hadapi, kamu sudah sangat berani dengan membagikannya. Jaga dirimu baik-baik ya, satu langkah kecil hari ini sudah cukup."
     
