@@ -2,6 +2,8 @@ const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
 const { pool } = require('../config/db');
 const { SECRET_KEY } = require('../middleware/authMiddleware');
+const crypto = require('crypto');
+const { sendResetPasswordEmail, sendWelcomeEmail } = require('../services/emailService');
 
 exports.register = async (req, res) => {
   const { username, email, password, birth_date, gender } = req.body;
@@ -16,12 +18,19 @@ exports.register = async (req, res) => {
       [username, email, hashedPassword, birth_date, gender]
     );
     res.status(201).json({ message: 'User registered successfully', userId: result.rows[0].id });
+    
+    // Kirim email perkenalan/sambutan secara background (async)
+    sendWelcomeEmail(email, username).catch(e => console.error("Gagal mengirim email sambutan:", e));
   } catch (err) {
-    if (err.code === '23505') {
-      if (err.constraint && err.constraint.includes('email')) {
-        return res.status(400).json({ error: 'Email already exists' });
+    if (err.code === '23505' || err.code === 'SQLITE_CONSTRAINT' || err.message.includes('UNIQUE')) {
+      const errMsg = err.message.toLowerCase();
+      if (errMsg.includes('email')) {
+        return res.status(400).json({ error: 'Email sudah terdaftar' });
       }
-      return res.status(400).json({ error: 'Username already exists' });
+      if (errMsg.includes('username')) {
+        return res.status(400).json({ error: 'Username sudah terdaftar' });
+      }
+      return res.status(400).json({ error: 'Username atau Email sudah terdaftar' });
     }
     console.error(err);
     res.status(500).json({ error: 'Server error' });
@@ -76,12 +85,72 @@ exports.updateProfile = async (req, res) => {
     const result = await pool.query(query, values);
     if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
     
-    res.json({ message: 'Profile updated successfully', user: result.rows[0] });
+    const updatedUser = result.rows[0];
+    const token = jwt.sign({ id: updatedUser.id, username: updatedUser.username, role: updatedUser.role }, SECRET_KEY, { expiresIn: '24h' });
+    res.json({ message: 'Profile updated successfully', token, user: updatedUser });
   } catch (err) {
-    if (err.code === '23505') {
-      return res.status(400).json({ error: 'Username or Email already exists' });
+    if (err.code === '23505' || err.code === 'SQLITE_CONSTRAINT' || err.message.includes('UNIQUE')) {
+      return res.status(400).json({ error: 'Username atau Email sudah terdaftar' });
     }
     console.error(err);
     res.status(500).json({ error: 'Database error' });
+  }
+};
+
+exports.forgotPassword = async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: 'Email wajib diisi' });
+
+  try {
+    const checkUser = await pool.query('SELECT * FROM users WHERE email = $1', [email]);
+    if (checkUser.rows.length === 0) {
+      return res.status(400).json({ error: 'Email tidak terdaftar' });
+    }
+
+    const user = checkUser.rows[0];
+    const token = crypto.randomBytes(20).toString('hex');
+    const expires = (Date.now() + 3600000).toString(); // 1 hour expiration in ms
+
+    await pool.query(
+      'UPDATE users SET reset_token = $1, reset_token_expires = $2 WHERE id = $3',
+      [token, expires, user.id]
+    );
+
+    await sendResetPasswordEmail(user.email, user.username, token);
+    res.json({ message: 'Tautan reset password berhasil dikirim ke email Anda' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database atau server error' });
+  }
+};
+
+exports.resetPassword = async (req, res) => {
+  const { token, password } = req.body;
+  if (!token || !password) {
+    return res.status(400).json({ error: 'Token dan Password baru wajib diisi' });
+  }
+
+  try {
+    const checkUser = await pool.query('SELECT * FROM users WHERE reset_token = $1', [token]);
+    if (checkUser.rows.length === 0) {
+      return res.status(400).json({ error: 'Token tidak valid atau sudah digunakan' });
+    }
+
+    const user = checkUser.rows[0];
+    const expiry = parseInt(user.reset_token_expires, 10);
+    if (Date.now() > expiry) {
+      return res.status(400).json({ error: 'Tautan reset password telah kadaluarsa' });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+    await pool.query(
+      'UPDATE users SET password = $1, reset_token = NULL, reset_token_expires = NULL WHERE id = $2',
+      [hashedPassword, user.id]
+    );
+
+    res.json({ message: 'Password berhasil direset. Silakan masuk kembali dengan password baru Anda' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database atau server error' });
   }
 };

@@ -27,6 +27,15 @@ app.use('/api/admin', adminRoutes);
 app.use('/api/public', publicRoutes);
 app.use('/api/chat', chatRoutes);
 
+// Daily Email Reminder Scheduler using node-cron (Setiap hari pukul 08:00 AM)
+const cron = require('node-cron');
+const { sendDailyMoodReminders } = require('./services/emailService');
+
+cron.schedule('0 8 * * *', () => {
+  console.log('⏰ [Cron Job] Memulai pengiriman otomatis email pengingat harian...');
+  sendDailyMoodReminders();
+});
+
 app.listen(PORT, () => {
   console.log(`Server is running on http://localhost:${PORT}`);
 });

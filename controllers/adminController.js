@@ -1,15 +1,19 @@
 const { pool } = require('../config/db');
+const { sendDailyMoodReminders } = require('../services/emailService');
+const bcrypt = require('bcryptjs');
 
 /** Window length for trend charts (calendar days including today). */
 const ANALYTICS_WINDOW_DAYS = 3;
 
 exports.getStats = async (req, res) => {
   try {
-    const userCount = await pool.query('SELECT COUNT(*) FROM users');
-    const postCount = await pool.query('SELECT COUNT(*) FROM posts');
+    const userCount = await pool.query('SELECT COUNT(*) AS count FROM users');
+    const postCount = await pool.query('SELECT COUNT(*) AS count FROM posts');
+    const uCount = parseInt(userCount.rows[0].count || userCount.rows[0]['count(*)'] || userCount.rows[0]['COUNT(*)']) || 0;
+    const pCount = parseInt(postCount.rows[0].count || postCount.rows[0]['count(*)'] || postCount.rows[0]['COUNT(*)']) || 0;
     res.json({
-      users: parseInt(userCount.rows[0].count, 10),
-      posts: parseInt(postCount.rows[0].count, 10),
+      users: uCount,
+      posts: pCount,
     });
   } catch (err) {
     console.error(err);
@@ -21,73 +25,67 @@ exports.getAnalytics = async (req, res) => {
   try {
     const windowDays = ANALYTICS_WINDOW_DAYS;
 
-    const [moodDistributionRes, moodTrendRes, postsPerDayRes, userGrowthRes] = await Promise.all([
-      pool.query(`
-        SELECT mood_type, COUNT(*)::int AS count
-        FROM moods
-        GROUP BY mood_type
-        ORDER BY mood_type
-      `),
-      pool.query(
-        `
-        SELECT TO_CHAR(d.day, 'YYYY-MM-DD') AS date,
-          COALESCE(SUM(CASE WHEN m.mood_type = 'happy' THEN 1 ELSE 0 END), 0)::int AS happy,
-          COALESCE(SUM(CASE WHEN m.mood_type = 'neutral' THEN 1 ELSE 0 END), 0)::int AS neutral,
-          COALESCE(SUM(CASE WHEN m.mood_type = 'sad' THEN 1 ELSE 0 END), 0)::int AS sad
-        FROM generate_series(
-          (CURRENT_DATE - (($1::int - 1) * INTERVAL '1 day'))::date,
-          CURRENT_DATE::date,
-          INTERVAL '1 day'
-        ) AS d(day)
-        LEFT JOIN moods m ON (
-          m.date ~ '^[0-9]{4}-[0-9]{2}-[0-9]{2}'
-          AND (m.date)::date = d.day
-        )
-        GROUP BY d.day
-        ORDER BY d.day ASC
-      `,
-        [windowDays]
-      ),
-      pool.query(
-        `
-        SELECT TO_CHAR(d.day, 'YYYY-MM-DD') AS date,
-          COUNT(p.id)::int AS count
-        FROM generate_series(
-          (CURRENT_DATE - (($1::int - 1) * INTERVAL '1 day'))::date,
-          CURRENT_DATE::date,
-          INTERVAL '1 day'
-        ) AS d(day)
-        LEFT JOIN posts p ON ((p.created_at)::date = d.day)
-        GROUP BY d.day
-        ORDER BY d.day ASC
-      `,
-        [windowDays]
-      ),
-      pool.query(
-        `
-        SELECT TO_CHAR(d.day, 'YYYY-MM-DD') AS date,
-          COUNT(u.id)::int AS count
-        FROM generate_series(
-          (CURRENT_DATE - (($1::int - 1) * INTERVAL '1 day'))::date,
-          CURRENT_DATE::date,
-          INTERVAL '1 day'
-        ) AS d(day)
-        LEFT JOIN users u ON ((u.created_at)::date = d.day)
-        GROUP BY d.day
-        ORDER BY d.day ASC
-      `,
-        [windowDays]
-      ),
-    ]);
+    // Generate last 3 dates in YYYY-MM-DD
+    const dates = [];
+    for (let i = windowDays - 1; i >= 0; i--) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      dates.push(d.toLocaleDateString('en-CA'));
+    }
+
+    // 1. Mood Distribution
+    const moodDistQuery = `
+      SELECT mood_type, COUNT(*) AS count
+      FROM moods
+      GROUP BY mood_type
+      ORDER BY mood_type
+    `;
+    const moodDistributionRes = await pool.query(moodDistQuery);
+
+    // 2. Mood Trend (Last 3 days)
+    const trendQuery = `
+      SELECT date, mood_type, COUNT(*) AS count 
+      FROM moods 
+      WHERE date IN ($1, $2, $3) 
+      GROUP BY date, mood_type
+    `;
+    const trendRes = await pool.query(trendQuery, dates);
+    const moodTrend = dates.map(date => {
+      const rows = trendRes.rows.filter(r => r.date === date);
+      const happy = parseInt(rows.find(r => r.mood_type === 'happy')?.count || 0, 10);
+      const neutral = parseInt(rows.find(r => r.mood_type === 'neutral')?.count || 0, 10);
+      const sad = parseInt(rows.find(r => r.mood_type === 'sad')?.count || 0, 10);
+      return { date, happy, neutral, sad };
+    });
+
+    // 3. Posts Per Day (Last 3 days)
+    const postsRes = await pool.query("SELECT created_at FROM posts");
+    const postsPerDay = dates.map(date => {
+      const count = postsRes.rows.filter(r => {
+        const postDate = r.created_at ? r.created_at.substring(0, 10) : '';
+        return postDate === date;
+      }).length;
+      return { date, count };
+    });
+
+    // 4. User Growth (Last 3 days)
+    const usersRes = await pool.query("SELECT created_at FROM users");
+    const userGrowth = dates.map(date => {
+      const count = usersRes.rows.filter(r => {
+        const userDate = r.created_at ? r.created_at.substring(0, 10) : '';
+        return userDate === date;
+      }).length;
+      return { date, count };
+    });
 
     res.json({
       moodDistribution: moodDistributionRes.rows,
-      moodTrend: moodTrendRes.rows,
-      postsPerDay: postsPerDayRes.rows,
-      userGrowth: userGrowthRes.rows,
+      moodTrend: moodTrend,
+      postsPerDay: postsPerDay,
+      userGrowth: userGrowth,
     });
   } catch (err) {
-    console.error(err);
+    console.error("Error getAnalytics:", err);
     res.status(500).json({ error: 'Database error' });
   }
 };
@@ -150,8 +148,8 @@ exports.createChannel = async (req, res) => {
     );
     res.status(201).json(result.rows[0]);
   } catch (err) {
-    if (err.code === '23505') {
-      return res.status(400).json({ error: 'Channel with this slug already exists' });
+    if (err.code === '23505' || err.code === 'SQLITE_CONSTRAINT' || err.message.includes('UNIQUE')) {
+      return res.status(400).json({ error: 'Saluran dengan slug ini sudah terdaftar' });
     }
     console.error(err);
     res.status(500).json({ error: 'Database error' });
@@ -201,7 +199,8 @@ exports.deleteUser = async (req, res) => {
 
     if (existing.rows[0].role === 'admin') {
       const admins = await pool.query("SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin'");
-      if (admins.rows[0].n <= 1) {
+      const adminCount = parseInt(admins.rows[0].n || admins.rows[0]['n'] || 0, 10);
+      if (adminCount <= 1) {
         return res.status(400).json({ error: 'Cannot delete the last admin account' });
       }
     }
@@ -245,7 +244,8 @@ exports.removeAdmin = async (req, res) => {
     }
 
     const admins = await pool.query("SELECT COUNT(*)::int AS n FROM users WHERE role = 'admin'");
-    if (admins.rows[0].n <= 1) {
+    const adminCount = parseInt(admins.rows[0].n || admins.rows[0]['n'] || 0, 10);
+    if (adminCount <= 1) {
       return res.status(400).json({ error: 'Cannot remove the last admin' });
     }
 
@@ -328,6 +328,76 @@ exports.deleteDoctor = async (req, res) => {
     const result = await pool.query('DELETE FROM doctors WHERE id = $1 RETURNING id', [id]);
     if (result.rowCount === 0) return res.status(404).json({ error: 'Doctor not found' });
     res.json({ message: 'Doctor deleted successfully' });
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+};
+
+exports.createUser = async (req, res) => {
+  const { username, email, password, role } = req.body;
+  if (!username || !password) {
+    return res.status(400).json({ error: 'Username dan Password wajib diisi' });
+  }
+
+  try {
+    const hashedPassword = await bcrypt.hash(password, 10);
+    const result = await pool.query(
+      'INSERT INTO users (username, email, password, role) VALUES ($1, $2, $3, $4) RETURNING id, username, email, role',
+      [username, email || '', hashedPassword, role || 'user']
+    );
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    if (err.code === '23505' || err.message.includes('UNIQUE')) {
+      return res.status(400).json({ error: 'Username atau Email sudah terdaftar' });
+    }
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+};
+
+exports.sendReminders = async (req, res) => {
+  try {
+    const result = await sendDailyMoodReminders();
+    if (result.success) {
+      res.json({ message: result.message, count: result.count, type: result.type });
+    } else {
+      res.status(500).json({ error: result.error });
+    }
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Failed to trigger reminders' });
+  }
+};
+
+exports.changeUserRole = async (req, res) => {
+  const userId = parseInt(req.params.id, 10);
+  const { role } = req.body;
+  if (!Number.isFinite(userId)) return res.status(400).json({ error: 'Invalid user ID' });
+  if (!role || (role !== 'admin' && role !== 'user')) {
+    return res.status(400).json({ error: 'Role must be either user or admin' });
+  }
+
+  try {
+    // If demoting to user, ensure we are not demoting the last admin
+    if (role === 'user') {
+      const existing = await pool.query('SELECT role FROM users WHERE id = $1', [userId]);
+      if (existing.rows.length > 0 && existing.rows[0].role === 'admin') {
+        const admins = await pool.query("SELECT COUNT(*) AS n FROM users WHERE role = 'admin'");
+        const adminCount = parseInt(admins.rows[0].n || admins.rows[0]['n'] || 0, 10);
+        if (adminCount <= 1) {
+          return res.status(400).json({ error: 'Cannot demote the last admin account' });
+        }
+      }
+    }
+
+    const result = await pool.query(
+      'UPDATE users SET role = $1 WHERE id = $2 RETURNING id, username, role',
+      [role, userId]
+    );
+
+    if (result.rows.length === 0) return res.status(404).json({ error: 'User not found' });
+    res.json({ message: `User role updated successfully to ${role}`, user: result.rows[0] });
   } catch (err) {
     console.error(err);
     res.status(500).json({ error: 'Database error' });

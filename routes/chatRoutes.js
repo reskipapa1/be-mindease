@@ -4,6 +4,7 @@ const chatController = require('../controllers/chatController');
 const { authenticateToken, optionalAuthenticateToken } = require('../middleware/authMiddleware');
 
 router.post('/agent', optionalAuthenticateToken, chatController.chatAgent);
+router.post('/predict', optionalAuthenticateToken, chatController.predictHealth);
 router.get('/history', authenticateToken, chatController.getChatHistory);
 router.post('/save-result', authenticateToken, chatController.saveChatResult);
 

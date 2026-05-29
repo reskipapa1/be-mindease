@@ -11,7 +11,9 @@ router.post('/posts/bulk-delete', authenticateAdmin, adminController.bulkDeleteP
 router.post('/channels', authenticateAdmin, adminController.createChannel);
 router.delete('/channels/:slug', authenticateAdmin, adminController.deleteChannel);
 router.get('/users', authenticateAdmin, adminController.getUsers);
+router.post('/users', authenticateAdmin, adminController.createUser);
 router.delete('/users/:id', authenticateAdmin, adminController.deleteUser);
+router.put('/users/:id/role', authenticateAdmin, adminController.changeUserRole);
 router.put('/make-admin/:username', authenticateAdmin, adminController.makeAdmin);
 router.put('/remove-admin/:username', authenticateAdmin, adminController.removeAdmin);
 
@@ -22,5 +24,7 @@ router.get('/doctors', authenticateAdmin, adminController.getDoctorsAdmin);
 router.post('/doctors', authenticateAdmin, adminController.addDoctor);
 router.put('/doctors/:id', authenticateAdmin, adminController.updateDoctor);
 router.delete('/doctors/:id', authenticateAdmin, adminController.deleteDoctor);
+
+router.post('/send-reminders', authenticateAdmin, adminController.sendReminders);
 
 module.exports = router;

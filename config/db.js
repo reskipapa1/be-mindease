@@ -1,46 +1,33 @@
-const sqlite3 = require('sqlite3').verbose();
-const path = require('path');
+const { Pool } = require('pg');
 require('dotenv').config();
 
-const dbPath = path.resolve(__dirname, '../database.sqlite');
-const db = new sqlite3.Database(dbPath);
+console.log('🔌 [Database] Connecting to PostgreSQL database...');
 
-const pool = {
-  query: (text, params) => {
-    return new Promise((resolve, reject) => {
-      // Convert $1, $2 to ? for sqlite3
-      let sqliteText = text.replace(/\$\d+/g, '?');
-      
-      // Convert some Postgres specific types to SQLite types
-      sqliteText = sqliteText
-        .replace(/SERIAL PRIMARY KEY/gi, 'INTEGER PRIMARY KEY AUTOINCREMENT')
-        .replace(/TIMESTAMP DEFAULT CURRENT_TIMESTAMP/gi, "DATETIME DEFAULT CURRENT_TIMESTAMP")
-        .replace(/NUMERIC\(\d+,\s*\d+\)/gi, "REAL");
-
-      db.all(sqliteText, params || [], function (err, rows) {
-        if (err) return reject(err);
-        resolve({ rows: rows || [], rowCount: this.changes || (rows ? rows.length : 0) });
-      });
-    });
-  }
-};
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL.includes('localhost') || process.env.DATABASE_URL.includes('127.0.0.1')
+    ? false
+    : { rejectUnauthorized: false }
+});
 
 const initDB = async () => {
   try {
+    // Create users table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS users (
         id SERIAL PRIMARY KEY,
         username VARCHAR(255) UNIQUE NOT NULL,
         email VARCHAR(255) UNIQUE,
         password VARCHAR(255) NOT NULL,
+        role VARCHAR(50) DEFAULT 'user',
+        birth_date VARCHAR(50),
+        gender VARCHAR(50),
+        reset_token VARCHAR(255),
+        reset_token_expires VARCHAR(100),
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-    try { await pool.query('ALTER TABLE users ADD COLUMN email VARCHAR(255) UNIQUE'); } catch (e) {}
-    try { await pool.query("ALTER TABLE users ADD COLUMN role VARCHAR(50) DEFAULT 'user'"); } catch (e) {}
-    try { await pool.query("ALTER TABLE users ADD COLUMN birth_date VARCHAR(50)"); } catch (e) {}
-    try { await pool.query("ALTER TABLE users ADD COLUMN gender VARCHAR(50)"); } catch (e) {}
-    
+
     // Create channels table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS channels (
@@ -53,16 +40,15 @@ const initDB = async () => {
     `);
 
     // Seed initial channels if table is empty
-    const seedCount = await pool.query('SELECT COUNT(*) FROM channels');
-    if (parseInt(seedCount.rows[0].count) === 0) {
+    const seedCount = await pool.query('SELECT COUNT(*) AS count FROM channels');
+    const count = parseInt(seedCount.rows[0].count) || 0;
+    if (count === 0) {
       await pool.query(`
         INSERT INTO channels (slug, name, description) VALUES
         ('curhat-umum', '💬-curhat-umum', 'Saluran bebas untuk membagikan keluh kesah dan cerita apa saja.'),
         ('stres-kecemasan', '🧠-stres-kecemasan', 'Tempat berbagi cerita seputar stres, kepanikan, dan kecemasan Anda.'),
-        ('insomnia-tidur', '🌙-insomnia-tidur', 'Mengalami masalah tidur? Yuk, saling bercerita dan berbagi tips di sini.'),
-        ('pelukan-hangat', '🫂-pelukan-hangat', 'Bila sedang sedih atau terluka, dapatkan pelukan hangat dan simpati di sini.')
+        ('insomnia-tidur', '🌙-insomnia-tidur', 'Mengalami masalah tidur? Yuk, saling bercerita dan berbagi tips di sini.')
       `);
-      console.log('Seeded initial channels successfully');
     }
 
     await pool.query(`
@@ -70,14 +56,10 @@ const initDB = async () => {
         id SERIAL PRIMARY KEY,
         user_id INTEGER NOT NULL REFERENCES users(id),
         content TEXT NOT NULL,
+        channel_slug VARCHAR(255) DEFAULT 'curhat-umum',
         created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       )
     `);
-
-    // Add channel_slug column to posts table
-    try { 
-      await pool.query("ALTER TABLE posts ADD COLUMN channel_slug VARCHAR(255) DEFAULT 'curhat-umum'"); 
-    } catch (e) {}
 
     await pool.query(`
       CREATE TABLE IF NOT EXISTS moods (
@@ -90,6 +72,7 @@ const initDB = async () => {
         UNIQUE(user_id, date)
       )
     `);
+
     await pool.query(`
       CREATE TABLE IF NOT EXISTS settings (
         id SERIAL PRIMARY KEY,
@@ -98,7 +81,6 @@ const initDB = async () => {
       )
     `);
 
-    // Insert default settings if they don't exist
     try {
       await pool.query(`INSERT INTO settings (setting_key, setting_value) VALUES ('dashboard_greeting', 'Bagaimana perasaanmu hari ini? Yuk ceritakan.') ON CONFLICT (setting_key) DO NOTHING`);
       await pool.query(`INSERT INTO settings (setting_key, setting_value) VALUES ('ai_prompt', 'Kamu adalah asisten AI yang ramah dan empatik untuk kesehatan mental. Berikan jawaban yang menenangkan dan suportif.') ON CONFLICT (setting_key) DO NOTHING`);
@@ -113,13 +95,14 @@ const initDB = async () => {
         rating NUMERIC(2, 1) DEFAULT 5.0,
         reviews INTEGER DEFAULT 0,
         available BOOLEAN DEFAULT true,
-        tags TEXT -- stored as comma-separated string
+        tags TEXT
       )
     `);
 
     // Insert default doctors if table is empty
-    const doctorsCount = await pool.query('SELECT COUNT(*) FROM doctors');
-    if (parseInt(doctorsCount.rows[0].count) === 0) {
+    const doctorsCount = await pool.query('SELECT COUNT(*) AS count FROM doctors');
+    const docCount = parseInt(doctorsCount.rows[0].count) || 0;
+    if (docCount === 0) {
       await pool.query(`
         INSERT INTO doctors (name, spec, exp, rating, reviews, available, tags) VALUES 
         ('Dr. Budi Santoso, M.Psi', 'Konselor Akademik Kampus', '8 Tahun', 4.9, 214, true, 'Kecemasan Skripsi,Burnout,Manajemen Waktu'),
@@ -128,7 +111,6 @@ const initDB = async () => {
       `);
     }
 
-    // Create chat_sessions table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS chat_sessions (
         id SERIAL PRIMARY KEY,
@@ -141,13 +123,6 @@ const initDB = async () => {
       )
     `);
 
-    try {
-      await pool.query("ALTER TABLE chat_sessions ADD COLUMN is_pinned BOOLEAN DEFAULT FALSE");
-    } catch (e) {
-      // Column might already exist
-    }
-
-    // Create chat_history table
     await pool.query(`
       CREATE TABLE IF NOT EXISTS chat_history (
         id SERIAL PRIMARY KEY,
@@ -163,17 +138,7 @@ const initDB = async () => {
       )
     `);
 
-    // Alter chat_history table if it already existed but didn't have session_id
-    try {
-      await pool.query(`
-        ALTER TABLE chat_history ADD COLUMN session_id INTEGER REFERENCES chat_sessions(id) ON DELETE CASCADE
-      `);
-      console.log('Successfully altered chat_history table to add session_id column');
-    } catch (e) {
-      // Column might already exist, safe to ignore
-    }
-
-    console.log('Connected to PostgreSQL/SQLite and verified tables');
+    console.log('Connected to PostgreSQL and verified tables');
   } catch (err) {
     console.error('Error initializing PostgreSQL tables', err);
   }

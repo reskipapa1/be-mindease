@@ -1,13 +1,85 @@
 // Native fetch tersedia di Node.js 18+ — tidak perlu install node-fetch
 const { pool } = require('../config/db');
 
+let GoogleGenAI, Groq;
+try {
+  GoogleGenAI = require('@google/genai').GoogleGenAI;
+} catch (e) {
+  console.warn("Package @google/genai tidak terinstall.");
+}
+try {
+  Groq = require('groq-sdk');
+} catch (e) {
+  console.warn("Package groq-sdk tidak terinstall.");
+}
+
 const FASTAPI_URL = 'http://localhost:8000';
 
-/**
- * chatAgent — Proxy tipis ke FastAPI /chat
- * Semua logika AI (safety protocol, feature extraction, Groq) ada di FastAPI.
- * Controller ini hanya meneruskan request, dan menambahkan logging riwayat ke PostgreSQL.
- */
+async function callAI(systemPrompt, userMessage) {
+  // 1. Coba Gemini jika ada kunci
+  if (process.env.GEMINI_API_KEY && GoogleGenAI) {
+    console.log("[AI Agent] Menggunakan Google Gemini Model...");
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [
+        { role: 'user', parts: [{ text: `${systemPrompt}\n\nPesan User:\n"${userMessage}"` }] }
+      ],
+      config: {
+        responseMimeType: 'application/json',
+        temperature: 0.7
+      }
+    });
+    return response.text;
+  }
+
+  // 2. Coba Groq jika ada kunci
+  if (process.env.GROQ_API_KEY && Groq) {
+    console.log("[AI Agent] Menggunakan Groq Llama Model...");
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const completion = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userMessage }
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.7,
+      max_tokens: 1024,
+    });
+    return completion.choices[0].message.content;
+  }
+
+  throw new Error("No API keys configured");
+}
+
+async function callAITitle(userMessage) {
+  const prompt = `Buatkan judul percakapan sangat singkat (maksimal 3 kata) yang merangkum maksud dari kalimat ini: "${userMessage}". Balas HANYA dengan judulnya saja, tanpa tanda kutip, tanpa titik.`;
+
+  if (process.env.GEMINI_API_KEY && GoogleGenAI) {
+    const ai = new GoogleGenAI({ apiKey: process.env.GEMINI_API_KEY });
+    const response = await ai.models.generateContent({
+      model: 'gemini-2.5-flash',
+      contents: [{ role: 'user', parts: [{ text: prompt }] }],
+      config: { temperature: 0.3 }
+    });
+    return response.text.trim();
+  }
+
+  if (process.env.GROQ_API_KEY && Groq) {
+    const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
+    const completion = await groq.chat.completions.create({
+      model: "llama-3.3-70b-versatile",
+      messages: [{ role: "user", content: prompt }],
+      temperature: 0.3,
+      max_tokens: 15
+    });
+    return completion.choices[0].message.content.trim();
+  }
+
+  throw new Error("No API keys configured");
+}
+
 exports.chatAgent = async (req, res) => {
   try {
     const { message, currentState, session_id } = req.body;
@@ -24,46 +96,263 @@ exports.chatAgent = async (req, res) => {
       }
     }
 
-    // 2. Kirim request ke FastAPI (Engine Utama)
-    const response = await fetch(`${FASTAPI_URL}/chat`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-            message: message,
-            history: currentState  // currentState dikirim sebagai history ke FastAPI
-        })
-    });
+    // Cek krisis darurat secara lokal demi keamanan!
+    const CRISIS_KEYWORDS = [
+      "bunuh diri", "ingin mati", "mau mati", "tidak mau hidup", "mau bunuh",
+      "mengakhiri hidup", "tidak ada gunanya hidup", "lebih baik mati",
+      "pengen mati", "pengin mati", "pengen bunuh diri", "pengin bunuh diri",
+      "self harm", "menyakiti diri"
+    ];
+    const isCrisis = CRISIS_KEYWORDS.some(kw => message.toLowerCase().includes(kw));
+    
+    if (isCrisis) {
+      const crisisResponse = {
+        is_crisis: true,
+        reply: "Hei, saya mendengarmu. Apa yang kamu rasakan sekarang sangat berat, dan saya khawatir dengan keadaanmu. Kamu tidak harus melewati ini sendirian. Tolong hubungi salah satu bantuan di bawah ini sekarang ya.",
+        extractedFeatures: {},
+        action: "SHOW_EMERGENCY_CONTACTS",
+        hotlines: [
+          { name: "Into The Light Indonesia", number: "119", ext: "ext 8", hours: "24 jam" },
+          { name: "Yayasan Pulih", number: "02178842580", display: "(021) 788-42580", hours: "Senin-Jumat" },
+          { name: "Hotline Kemenkes", number: "1500454", display: "1500-454", hours: "24 jam" }
+        ]
+      };
 
-    if (!response.ok) {
-        throw new Error(`FastAPI error: ${response.status}`);
+      if (req.user && session_id) {
+        try {
+          await pool.query(
+            "INSERT INTO chat_history (user_id, session_id, sender, text, type) VALUES ($1, $2, $3, $4, $5)",
+            [req.user.id, session_id, 'ai', crisisResponse.reply, 'text']
+          );
+        } catch (dbErr) {}
+      }
+
+      return res.json(crisisResponse);
     }
 
-    const data = await response.json();
-
-    // 3. Perekaman pesan balasan AI ke database (hanya jika pengguna sedang login)
-    if (req.user && session_id && data.reply) {
+    // 2. Coba panggil AI Model jika API Key tersedia
+    if ((process.env.GEMINI_API_KEY && GoogleGenAI) || (process.env.GROQ_API_KEY && Groq)) {
       try {
-        await pool.query(
-          "INSERT INTO chat_history (user_id, session_id, sender, text, type) VALUES ($1, $2, $3, $4, $5)",
-          [req.user.id, session_id, 'ai', data.reply, 'text']
-        );
-      } catch (dbErr) {
-        console.error("Gagal merekam chat AI ke DB:", dbErr.message);
+        const missingFeatures = [];
+        if (currentState && typeof currentState === 'object') {
+          for (const [key, value] of Object.entries(currentState)) {
+            if (value === null) {
+              missingFeatures.push(key);
+            }
+          }
+        }
+        const nextQuestionHint = missingFeatures[0] || 'semua sudah lengkap';
+
+        const prompt = `Kamu adalah "MindEase AI", teman curhat yang empatik untuk mahasiswa Indonesia.
+
+TUGASMU:
+1. Balas dengan empati dan hangat (2-3 kalimat bahasa Indonesia santai).
+2. Di akhir, selipkan pertanyaan NATURAL untuk menggali info tentang: "${nextQuestionHint}" (atau jika semua sudah lengkap, beritahu bahwa datanya sudah lengkap).
+3. Dari pesan user, ekstrak nilai untuk fitur berikut JIKA disebutkan:
+   - age (umur, angka)
+   - gender (Male/Female/Other)
+   - academic_year (tahun kuliah 1-4, angka)
+   - study_hours_per_day (jam belajar per hari, angka)
+   - exam_pressure (tekanan ujian 0-10, angka)
+   - academic_performance (nilai akademik 0-100, angka)
+   - stress_level (level stres 0-10, angka)
+   - anxiety_score (skor kecemasan 0-10, angka)
+   - depression_score (skor depresi 0-10, angka)
+   - sleep_hours (jam tidur per hari, angka)
+   - physical_activity (jam olahraga per minggu, angka)
+   - social_support (dukungan sosial 0-10, angka)
+   - screen_time (jam layar per hari, angka)
+   - internet_usage (jam internet per hari, angka)
+   - financial_stress (tekanan finansial 0-10, angka)
+   - family_expectation (ekspektasi keluarga 0-10, angka)
+
+ATURAN WAJIB:
+- JANGAN tanya ulang hal yang sudah dijawab user
+- Jika user menjawab "iya/ya/betul/oke" -> KONFIRMASI dan lanjut ke topik berikutnya
+- Satu pertanyaan per giliran saja
+- Validasi perasaan user SEBELUM bertanya hal teknis
+- Jangan pernah merespons kata krisis (bunuh diri, mau mati) dengan pertanyaan biasa
+
+PENTING: Hanya balas dengan JSON murni, tidak ada teks lain dengan struktur:
+{"reply": "balasan empati kamu", "extractedFeatures": {"nama_fitur": nilai}}`;
+
+        const rawText = await callAI(prompt, message);
+        let parsed = { reply: "Aku mendengarmu. Ceritakan lebih banyak ya. 💙", extractedFeatures: {} };
+        try {
+          parsed = JSON.parse(rawText);
+        } catch (jsonErr) {
+          const jsonMatch = rawText.match(/\{[\s\S]*\}/);
+          if (jsonMatch) parsed = JSON.parse(jsonMatch[0]);
+        }
+
+        const cleanFeatures = {};
+        if (parsed.extractedFeatures) {
+          for (const [k, v] of Object.entries(parsed.extractedFeatures)) {
+            if (v !== null && v !== "") {
+              cleanFeatures[k] = v;
+            }
+          }
+        }
+
+        // Perekaman pesan balasan AI ke database
+        if (req.user && session_id && parsed.reply) {
+          try {
+            await pool.query(
+              "INSERT INTO chat_history (user_id, session_id, sender, text, type) VALUES ($1, $2, $3, $4, $5)",
+              [req.user.id, session_id, 'ai', parsed.reply, 'text']
+            );
+          } catch (dbErr) {
+            console.error("Gagal merekam chat AI ke DB:", dbErr.message);
+          }
+        }
+
+        return res.json({
+          reply: parsed.reply,
+          extractedFeatures: cleanFeatures,
+          is_crisis: false,
+          action: "CONTINUE_CHAT"
+        });
+
+      } catch (aiError) {
+        console.warn("⚠️ AI Model Error, beralih ke Smart Local Fallback:", aiError.message);
       }
     }
 
-    // 4. Format response sesuai yang diharapkan frontend (Chatbot.jsx)
-    // { reply, extractedFeatures, is_crisis, action, hotlines }
-    res.json(data);
+    // 3. Coba kirim request ke FastAPI (Engine Utama - jika berjalan lokal)
+    try {
+      const response = await fetch(`${FASTAPI_URL}/chat`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+              message: message,
+              history: currentState
+          })
+      });
 
-  } catch (error) {
-    console.error("chatAgent Proxy Error:", error.message);
+      if (response.ok) {
+        const data = await response.json();
+        if (req.user && session_id && data.reply) {
+          try {
+            await pool.query(
+              "INSERT INTO chat_history (user_id, session_id, sender, text, type) VALUES ($1, $2, $3, $4, $5)",
+              [req.user.id, session_id, 'ai', data.reply, 'text']
+            );
+          } catch (dbErr) {
+            console.error("Gagal merekam chat AI ke DB:", dbErr.message);
+          }
+        }
+        return res.json(data);
+      }
+    } catch (fastApiErr) {
+      // Abaikan dan lanjut ke Smart Local Fallback
+    }
+
+    // ==========================================
+    // SMART LOCAL FALLBACK (Mode Teman Curhat)
+    // ==========================================
+    console.warn("⚠️ FastAPI/Groq Offline. Mengaktifkan Mode Teman Curhat MindEase (Smart Local Fallback)...");
+
+    const missingFeatures = [];
+    if (currentState && typeof currentState === 'object') {
+      for (const [key, value] of Object.entries(currentState)) {
+        if (value === null) {
+          missingFeatures.push(key);
+        }
+      }
+    }
+
+    let reply = "Aku di sini untuk mendengarkanmu. Ceritakan lebih banyak tentang apa yang sedang kamu rasakan ya. 💙";
+    const extracted = {};
+
+
+
+    // Ekstrak fitur secara cerdas dari input pesan user saat ini
+    const numMatch = message.match(/\b\d+(\.\d+)?\b/);
+    const parsedNum = numMatch ? parseFloat(numMatch[0]) : null;
+
+    if (missingFeatures.length > 0) {
+      const nextFeature = missingFeatures[0];
+
+      // Simulasikan ekstraksi berdasarkan apa yang dijawab user
+      if (nextFeature === 'age' && parsedNum && parsedNum > 10 && parsedNum < 100) {
+        extracted['age'] = parsedNum;
+        missingFeatures.shift();
+      } else if (nextFeature === 'gender') {
+        const textLower = message.toLowerCase();
+        if (textLower.includes('perempuan') || textLower.includes('cewek') || textLower.includes('wanita') || textLower.includes('female')) {
+          extracted['gender'] = 'Female';
+          missingFeatures.shift();
+        } else if (textLower.includes('laki') || textLower.includes('cowok') || textLower.includes('pria') || textLower.includes('male')) {
+          extracted['gender'] = 'Male';
+          missingFeatures.shift();
+        }
+      } else if (parsedNum !== null) {
+        // Imputasi angka ke fitur numerik berikutnya
+        extracted[nextFeature] = parsedNum;
+        missingFeatures.shift();
+      }
+
+      // Siapkan pertanyaan berikutnya untuk menggali fitur yang masih null
+      if (missingFeatures.length > 0) {
+        const currentTarget = missingFeatures[0];
+        const questions = {
+          age: "Boleh tahu berapa umurmu saat ini? (contoh: 20)",
+          gender: "Apa jenis kelaminmu? (Laki-laki / Perempuan)",
+          academic_year: "Saat ini kamu sedang menempuh perkuliahan di tahun/angkatan ke berapa? (1 - 4)",
+          study_hours_per_day: "Berapa jam yang biasanya kamu habiskan untuk belajar dalam sehari?",
+          exam_pressure: "Dari skala 1 sampai 10, seberapa berat tekanan ujian yang kamu rasakan?",
+          academic_performance: "Berapa nilai rata-rata prestasi akademik (IPK/nilai) kamu dalam skala 100?",
+          stress_level: "Dari skala 1 sampai 10, berapa tingkat stres yang kamu rasakan belakangan ini?",
+          anxiety_score: "Dari skala 1 sampai 10, seberapa sering kamu merasakan kecemasan berlebih?",
+          depression_score: "Dari skala 1 sampai 10, seberapa sering kamu merasa sedih atau lelah emosional?",
+          sleep_hours: "Berapa jam rata-rata kamu tidur dalam sehari?",
+          physical_activity: "Berapa jam biasanya kamu berolahraga atau melakukan aktivitas fisik dalam seminggu?",
+          social_support: "Dari skala 1 sampai 10, seberapa besar dukungan sosial yang kamu rasakan dari teman atau keluarga?",
+          screen_time: "Berapa jam rata-rata screen time (waktu di depan layar HP/laptop) kamu per hari?",
+          internet_usage: "Berapa jam waktu yang kamu habiskan untuk internetan dalam sehari?",
+          financial_stress: "Dari skala 1 sampai 10, seberapa besar tekanan finansial yang kamu rasakan saat ini?",
+          family_expectation: "Dari skala 1 sampai 10, seberapa tinggi ekspektasi keluarga yang membebanimu?"
+        };
+
+        const featureLabels = {
+          age: "umur",
+          gender: "jenis kelamin",
+          academic_year: "tahun kuliah",
+          study_hours_per_day: "jam belajar per hari",
+          exam_pressure: "tekanan ujian",
+          academic_performance: "prestasi akademik",
+          stress_level: "level stres",
+          anxiety_score: "skor kecemasan",
+          depression_score: "skor depresi",
+          sleep_hours: "jam tidur",
+          physical_activity: "aktivitas fisik",
+          social_support: "dukungan sosial",
+          screen_time: "screen time",
+          internet_usage: "penggunaan internet",
+          financial_stress: "tekanan finansial",
+          family_expectation: "ekspektasi keluarga"
+        };
+
+        const targetLabel = featureLabels[currentTarget] || currentTarget;
+        const defaultQuestion = `Boleh ceritakan seputar ${targetLabel} kamu?`;
+
+        reply = `Terima kasih sudah berbagi. ${questions[currentTarget] || defaultQuestion} 💙`;
+      } else {
+        reply = "Semua informasimu telah lengkap terkumpul! Yuk, klik tombol **'Selesaikan & Analisis'** di bagian bawah untuk melihat hasil analisis kesehatan mentalmu. 🪄";
+      }
+    } else {
+      reply = "Informasimu sudah lengkap terkumpul! Yuk, klik tombol **'Selesaikan & Analisis'** di kanan bawah untuk melihat hasil analisis kesehatan mentalmu. 🪄";
+    }
+
     res.json({
-        reply: "Aku dengar kamu kok. Ceritakan lebih lanjut, aku ada di sini untukmu. 💙",
-        extractedFeatures: {},
-        is_crisis: false,
-        action: "CONTINUE_CHAT"
+      reply,
+      extractedFeatures: extracted,
+      is_crisis: false,
+      action: "CONTINUE_CHAT"
     });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: 'Server error' });
   }
 };
 
@@ -144,13 +433,13 @@ exports.getSessions = async (req, res) => {
         "INSERT INTO chat_sessions (user_id, title) VALUES ($1, $2) RETURNING *",
         [req.user.id, 'Obrolan Baru #1']
       );
-      
+
       // Kirim salam pembuka default dari AI ke riwayat chat baru ini
       await pool.query(
         "INSERT INTO chat_history (user_id, session_id, sender, text, type) VALUES ($1, $2, $3, $4, $5)",
         [req.user.id, newSession.rows[0].id, 'ai', 'Halo! Saya AI MindEase. Ada yang ingin kamu ceritakan hari ini? Jangan ragu untuk berbagi.', 'text']
       );
-      
+
       return res.json([newSession.rows[0]]);
     }
 
@@ -165,10 +454,11 @@ exports.createSession = async (req, res) => {
   try {
     // Ambil jumlah sesi untuk penomoran
     const countResult = await pool.query(
-      "SELECT COUNT(*) FROM chat_sessions WHERE user_id = $1",
+      "SELECT COUNT(*) AS count FROM chat_sessions WHERE user_id = $1",
       [req.user.id]
     );
-    const sessionNum = parseInt(countResult.rows[0].count) + 1;
+    const row = countResult.rows[0];
+    const sessionNum = (parseInt(row.count || row['count(*)'] || row['COUNT(*)']) || 0) + 1;
     const title = `Obrolan Baru #${sessionNum}`;
 
     const newSession = await pool.query(
@@ -236,7 +526,7 @@ exports.updateSession = async (req, res) => {
     values.push(id, req.user.id);
 
     const result = await pool.query(query, values);
-    
+
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Session not found' });
     }
@@ -287,4 +577,65 @@ exports.generateSessionTitle = async (req, res) => {
     res.status(500).json({ error: 'Failed to generate title' });
   }
 };
+
+exports.predictHealth = async (req, res) => {
+  const { features } = req.body;
+  try {
+    // 1. Coba hubungi FastAPI di port 8000 jika menyala
+    const response = await fetch('http://localhost:8000/predict', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ features })
+    });
+    if (response.ok) {
+      const data = await response.json();
+      return res.json(data);
+    }
+  } catch (e) {
+    console.warn("⚠️ FastAPI Offline untuk prediksi, menggunakan AI/Heuristik lokal...");
+  }
+
+  // 2. Jika offline, hitung secara lokal
+  const stress = parseFloat(features.stress_level || 5);
+  const anxiety = parseFloat(features.anxiety_score || 5);
+  const depression = parseFloat(features.depression_score || 5);
+  const averageScore = (stress + anxiety + depression) / 3;
+  
+  let riskLevel = 'Low';
+  if (averageScore >= 7) {
+    riskLevel = 'High';
+  } else if (averageScore >= 4) {
+    riskLevel = 'Medium';
+  }
+  const burnoutScore = Math.min(10, Math.max(0, parseFloat((averageScore * 1.1).toFixed(1))));
+
+  // 3. Panggil AI untuk memberikan rekomendasi hangat jika ada key
+  let recommendation = "Keadaan emosionalmu tampak cukup stabil. Tetap pertahankan pola hidup seimbang dan luangkan waktu untuk relaksasi ya.";
+  try {
+    if ((process.env.GEMINI_API_KEY && GoogleGenAI) || (process.env.GROQ_API_KEY && Groq)) {
+      const levelMap = { 'High': 'tinggi', 'Medium': 'sedang', 'Low': 'rendah' };
+      const levelIndo = levelMap[riskLevel] || 'stabil';
+      const aiPrompt = `Kamu adalah asisten kesehatan mental yang hangat. Analisis hasil mahasiswa: tingkat risiko mental ${levelIndo}, skor burnout ${burnoutScore} dari 10. Berikan rekomendasi singkat yang memotivasi dan penuh empati dalam 2-3 kalimat santai bahasa Indonesia. JANGAN sebut angka atau skor apa pun.`;
+      
+      const aiText = await callAI(aiPrompt, "Berikan saya rekomendasi.");
+      if (aiText) {
+        try {
+          const parsed = JSON.parse(aiText);
+          recommendation = parsed.reply || aiText;
+        } catch (e) {
+          recommendation = aiText;
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Gagal mendapatkan rekomendasi AI:", err);
+  }
+
+  res.json({
+    risk_level: riskLevel,
+    burnout_score: burnoutScore,
+    genai_recommendation: recommendation
+  });
+};
+
 
