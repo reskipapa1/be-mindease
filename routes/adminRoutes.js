@@ -9,6 +9,7 @@ router.get('/posts', authenticateAdmin, adminController.getPosts);
 router.delete('/posts/:id', authenticateAdmin, adminController.deletePost);
 router.post('/posts/bulk-delete', authenticateAdmin, adminController.bulkDeletePosts);
 router.post('/channels', authenticateAdmin, adminController.createChannel);
+router.put('/channels/:slug', authenticateAdmin, adminController.updateChannel);
 router.delete('/channels/:slug', authenticateAdmin, adminController.deleteChannel);
 router.get('/users', authenticateAdmin, adminController.getUsers);
 router.post('/users', authenticateAdmin, adminController.createUser);

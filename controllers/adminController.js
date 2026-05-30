@@ -62,7 +62,7 @@ exports.getAnalytics = async (req, res) => {
     const postsRes = await pool.query("SELECT created_at FROM posts");
     const postsPerDay = dates.map(date => {
       const count = postsRes.rows.filter(r => {
-        const postDate = r.created_at ? r.created_at.substring(0, 10) : '';
+        const postDate = r.created_at ? new Date(r.created_at).toISOString().substring(0, 10) : '';
         return postDate === date;
       }).length;
       return { date, count };
@@ -72,7 +72,7 @@ exports.getAnalytics = async (req, res) => {
     const usersRes = await pool.query("SELECT created_at FROM users");
     const userGrowth = dates.map(date => {
       const count = usersRes.rows.filter(r => {
-        const userDate = r.created_at ? r.created_at.substring(0, 10) : '';
+        const userDate = r.created_at ? new Date(r.created_at).toISOString().substring(0, 10) : '';
         return userDate === date;
       }).length;
       return { date, count };
@@ -156,11 +156,25 @@ exports.createChannel = async (req, res) => {
   }
 };
 
+exports.updateChannel = async (req, res) => {
+  const { slug } = req.params;
+  const { name, description } = req.body;
+  if (!name) return res.status(400).json({ error: 'Name is required' });
+  try {
+    const result = await pool.query(
+      'UPDATE channels SET name = $1, description = $2 WHERE slug = $3 RETURNING *',
+      [name, description || '', slug]
+    );
+    if (result.rows.length === 0) return res.status(404).json({ error: 'Channel not found' });
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error(err);
+    res.status(500).json({ error: 'Database error' });
+  }
+};
+
 exports.deleteChannel = async (req, res) => {
   const { slug } = req.params;
-  if (slug === 'curhat-umum') {
-    return res.status(400).json({ error: 'Cannot delete the default general channel' });
-  }
   try {
     // Delete all posts in this channel first
     await pool.query('DELETE FROM posts WHERE channel_slug = $1', [slug]);
