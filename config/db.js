@@ -138,6 +138,23 @@ const initDB = async () => {
       )
     `);
 
+    // --- MIGRATION: Pastikan semua kolom baru ditambahkan jika tabel sudah ada sebelumnya ---
+    try { await pool.query("ALTER TABLE users ADD COLUMN role VARCHAR(50) DEFAULT 'user'"); } catch (e) {}
+    try { await pool.query("ALTER TABLE users ADD COLUMN birth_date VARCHAR(50)"); } catch (e) {}
+    try { await pool.query("ALTER TABLE users ADD COLUMN gender VARCHAR(50)"); } catch (e) {}
+    try { await pool.query("ALTER TABLE users ADD COLUMN reset_token VARCHAR(255)"); } catch (e) {}
+    try { await pool.query("ALTER TABLE users ADD COLUMN reset_token_expires VARCHAR(100)"); } catch (e) {}
+    
+    try { 
+      await pool.query("ALTER TABLE posts ADD COLUMN channel_slug VARCHAR(255) DEFAULT 'curhat-umum'"); 
+      console.log("🔌 [Database] Kolom channel_slug sukses ditambahkan/diverifikasi di tabel posts");
+    } catch (e) {}
+
+    try { 
+      await pool.query("ALTER TABLE chat_sessions ADD COLUMN is_pinned BOOLEAN DEFAULT FALSE"); 
+      console.log("🔌 [Database] Kolom is_pinned sukses ditambahkan/diverifikasi di tabel chat_sessions");
+    } catch (e) {}
+
     console.log('Connected to PostgreSQL and verified tables');
   } catch (err) {
     console.error('Error initializing PostgreSQL tables', err);
