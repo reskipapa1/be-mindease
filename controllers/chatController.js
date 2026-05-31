@@ -80,9 +80,61 @@ async function callAITitle(userMessage) {
   throw new Error("No API keys configured");
 }
 
+function calculateAge(birthDateStr) {
+  if (!birthDateStr) return null;
+  const birthDate = new Date(birthDateStr);
+  if (isNaN(birthDate.getTime())) return null;
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const m = today.getMonth() - birthDate.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  return age;
+}
+
+function mapGender(genderStr) {
+  if (!genderStr) return null;
+  const g = genderStr.trim().toLowerCase();
+  if (g.startsWith('l') || g === 'pria' || g === 'male' || g === 'laki-laki') return 'Male';
+  if (g.startsWith('p') || g === 'wanita' || g === 'female' || g === 'perempuan') return 'Female';
+  return 'Other';
+}
+
 exports.chatAgent = async (req, res) => {
   try {
-    const { message, currentState, session_id } = req.body;
+    const { message, currentState, session_id, mode } = req.body;
+    const activeMode = mode || 'chat';
+
+    // Ambil data profil (gender & umur) otomatis untuk disuntikkan demi kenyamanan UX
+    let userGender = null;
+    let userAge = null;
+
+    if (req.user) {
+      try {
+        const userRes = await pool.query(
+          "SELECT gender, birth_date FROM users WHERE id = $1",
+          [req.user.id]
+        );
+        if (userRes.rows.length > 0) {
+          const userObj = userRes.rows[0];
+          userGender = mapGender(userObj.gender);
+          userAge = calculateAge(userObj.birth_date);
+        }
+      } catch (dbErr) {
+        console.error("Gagal mengambil profil user untuk chatbot:", dbErr.message);
+      }
+    }
+
+    // Suntikkan gender & age jika belum terisi di currentState
+    if (currentState && typeof currentState === 'object') {
+      if (userGender && currentState.gender === null) {
+        currentState.gender = userGender;
+      }
+      if (userAge && currentState.age === null) {
+        currentState.age = userAge;
+      }
+    }
 
     // 1. Perekaman pesan user ke database (hanya jika pengguna sedang login)
     if (req.user && session_id) {
@@ -143,12 +195,17 @@ exports.chatAgent = async (req, res) => {
         }
         const nextQuestionHint = missingFeatures[0] || 'semua sudah lengkap';
 
-        const prompt = `Kamu adalah "MindEase AI", teman curhat yang empatik untuk mahasiswa Indonesia.
+        let prompt = "";
+        
+        if (activeMode === 'chat') {
+          prompt = `Kamu adalah "MindEase AI", sahabat curhat yang sangat empatik, hangat, dan suportif untuk mahasiswa Indonesia.
 
 TUGASMU:
-1. Balas dengan empati dan hangat (2-3 kalimat bahasa Indonesia santai).
-2. Di akhir, selipkan pertanyaan NATURAL untuk menggali info tentang: "${nextQuestionHint}" (atau jika semua sudah lengkap, beritahu bahwa datanya sudah lengkap).
-3. Dari pesan user, ekstrak nilai untuk fitur berikut JIKA disebutkan:
+1. Berikan tanggapan yang tulus, penuh empati, dan menenangkan (2-3 kalimat bahasa Indonesia santai).
+2. Fokus sepenuhnya pada validasi emosi dan mendengarkan keluh kesah user secara alami.
+3. JANGAN pernah menanyakan data teknis, skor, angka, atau variabel apa pun secara paksa. Biarkan percakapan mengalir santai.
+4. Di akhir tanggapan, Anda boleh mengajukan satu pertanyaan terbuka yang lembut untuk mendorong mereka bercerita lebih lanjut tentang perasaan mereka (bukan tentang data numerik).
+5. Dari pesan user, tetap lakukan ekstraksi secara diam-diam JIKA mereka menyebutkan informasi berikut (jika tidak ada, kosongkan saja):
    - age (umur, angka)
    - gender (Male/Female/Other)
    - academic_year (tahun kuliah 1-4, angka)
@@ -166,15 +223,33 @@ TUGASMU:
    - financial_stress (tekanan finansial 0-10, angka)
    - family_expectation (ekspektasi keluarga 0-10, angka)
 
-ATURAN WAJIB:
-- JANGAN tanya ulang hal yang sudah dijawab user
-- Jika user menjawab "iya/ya/betul/oke" -> KONFIRMASI dan lanjut ke topik berikutnya
-- Satu pertanyaan per giliran saja
-- Validasi perasaan user SEBELUM bertanya hal teknis
-- Jangan pernah merespons kata krisis (bunuh diri, mau mati) dengan pertanyaan biasa
-
-PENTING: Hanya balas dengan JSON murni, tidak ada teks lain dengan struktur:
+PENTING: Hanya balas dengan JSON murni dengan struktur:
 {"reply": "balasan empati kamu", "extractedFeatures": {"nama_fitur": nilai}}`;
+        } else {
+          prompt = `Kamu adalah "MindEase AI", asisten kesehatan mental yang lembut dan penuh empati. Saat ini kamu sedang membimbing user dalam sesi **Asesmen Kesehatan Mental Terpandu** secara bertahap.
+
+TUGASMU:
+1. Target pertanyaan saat ini adalah untuk menggali info tentang fitur: "${nextQuestionHint}".
+2. Balas pesan user dengan empati hangat (1-2 kalimat), kemudian ajukan satu pertanyaan kualitatif yang sangat natural tentang "${nextQuestionHint}".
+3. ATURAN MUTLAK: JANGAN PERNAH menanyakan nilai angka atau rate 1-10 secara langsung!
+   - Contoh salah: "Dari 1-10 seberapa cemas kamu?"
+   - Contoh benar: "Bagaimana rasanya ketika kecemasan itu datang menyerangmu? Apakah kamu merasa sangat tidak tenang dan panik, atau masih bisa dikendalikan dengan baik?"
+4. Dari jawaban kualitatif user, kamu harus menyimpulkan sendiri nilai estimasi angkanya:
+   - Skala 1-10 (misal: stress_level, anxiety_score, depression_score, exam_pressure, social_support, financial_stress, family_expectation):
+     * Sangat ringan/hampir tidak ada -> 1-2
+     * Ringan/kadang-kadang -> 3-4
+     * Sedang/cukup terasa -> 5-6
+     * Berat/sering/cukup mengganggu -> 7-8
+     * Sangat berat/ekstrem/tidak tertahankan -> 9-10
+   - Skala 0-100 (academic_performance):
+     * Kurang/buruk -> 40-59
+     * Cukup/sedang -> 60-79
+     * Sangat baik/IPK tinggi -> 80-100
+5. Masukkan nilai kesimpulan angka tersebut ke dalam objek extractedFeatures untuk fitur: "${nextQuestionHint}".
+
+PENTING: Hanya balas dengan JSON murni dengan struktur:
+{"reply": "balasan empati dan pertanyaan kualitatif kamu", "extractedFeatures": {"nama_fitur": nilai}}`;
+        }
 
         const rawText = await callAI(prompt, message);
         let parsed = { reply: "Aku mendengarmu. Ceritakan lebih banyak ya. 💙", extractedFeatures: {} };
@@ -192,6 +267,14 @@ PENTING: Hanya balas dengan JSON murni, tidak ada teks lain dengan struktur:
               cleanFeatures[k] = v;
             }
           }
+        }
+
+        // Suntikkan gender & age jika belum ada di percakapan aktif
+        if (userGender && (!currentState || currentState.gender === null)) {
+          cleanFeatures.gender = userGender;
+        }
+        if (userAge && (!currentState || currentState.age === null)) {
+          cleanFeatures.age = userAge;
         }
 
         // Perekaman pesan balasan AI ke database
@@ -231,6 +314,18 @@ PENTING: Hanya balas dengan JSON murni, tidak ada teks lain dengan struktur:
 
       if (response.ok) {
         const data = await response.json();
+        
+        // Suntikkan gender & age jika belum ada di percakapan aktif
+        if (!data.extractedFeatures) {
+          data.extractedFeatures = {};
+        }
+        if (userGender && (!currentState || currentState.gender === null)) {
+          data.extractedFeatures.gender = userGender;
+        }
+        if (userAge && (!currentState || currentState.age === null)) {
+          data.extractedFeatures.age = userAge;
+        }
+
         if (req.user && session_id && data.reply) {
           try {
             await pool.query(
@@ -342,6 +437,14 @@ PENTING: Hanya balas dengan JSON murni, tidak ada teks lain dengan struktur:
       }
     } else {
       reply = "Informasimu sudah lengkap terkumpul! Yuk, klik tombol **'Selesaikan & Analisis'** di kanan bawah untuk melihat hasil analisis kesehatan mentalmu. 🪄";
+    }
+
+    // Suntikkan gender & age jika belum ada di percakapan aktif
+    if (userGender && (!currentState || currentState.gender === null)) {
+      extracted.gender = userGender;
+    }
+    if (userAge && (!currentState || currentState.age === null)) {
+      extracted.age = userAge;
     }
 
     res.json({
