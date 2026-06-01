@@ -625,22 +625,9 @@ PENTING: Hanya balas dengan JSON murni dengan struktur:
       // ----------------------------------------------------
       const reply = "Aku di sini untuk mendengarkan keluh kesahmu. Ceritakan saja apa yang sedang membebani pikiranmu secara santai ya. Jika kamu ingin menganalisis tingkat burnout atau stres secara detail, klik tombol **'🪄 Mulai Asesmen Kesehatan Mental'** di bawah obrolan agar aku bisa memandumu secara terarah. 💙";
 
-      // Ekstrak secara pasif jika tidak sengaja menyebutkan gender, umur, atau jam tidur
-      const textLower = message.toLowerCase();
-      if (textLower.includes('perempuan') || textLower.includes('cewek') || textLower.includes('wanita') || textLower.includes('female')) {
-        extracted.gender = 'Female';
-      } else if (textLower.includes('laki') || textLower.includes('cowok') || textLower.includes('pria') || textLower.includes('male')) {
-        extracted.gender = 'Male';
-      }
-
-      if (parsedNum && parsedNum > 10 && parsedNum < 100) {
-        extracted.age = parsedNum;
-      }
-
-      const sleepMatch = message.match(/\b([1-9]|1[0-2])\s*(jam|hours)\b/i);
-      if (sleepMatch) {
-        extracted.sleep_hours = parseFloat(sleepMatch[1]);
-      }
+      // Ekstrak secara pasif menggunakan fungsi pembantu pintar terpusat
+      const localExtracted = extractFeaturesLocally(message, currentState);
+      Object.assign(extracted, localExtracted);
 
       // Perekaman pesan balasan AI ke database
       if (req.user && session_id) {
