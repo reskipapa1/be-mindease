@@ -106,6 +106,8 @@ exports.chatAgent = async (req, res) => {
   try {
     const { message, currentState, session_id, mode } = req.body;
     const activeMode = mode || 'chat';
+    const hadNoGender = !currentState || currentState.gender === null || currentState.gender === undefined;
+    const hadNoAge = !currentState || currentState.age === null || currentState.age === undefined;
 
     // Ambil data profil (gender & umur) otomatis untuk disuntikkan demi kenyamanan UX
     let userGender = null;
@@ -157,7 +159,7 @@ exports.chatAgent = async (req, res) => {
       "self harm", "menyakiti diri"
     ];
     const isCrisis = CRISIS_KEYWORDS.some(kw => message.toLowerCase().includes(kw));
-    
+
     if (isCrisis) {
       const crisisResponse = {
         is_crisis: true,
@@ -177,7 +179,7 @@ exports.chatAgent = async (req, res) => {
             "INSERT INTO chat_history (user_id, session_id, sender, text, type) VALUES ($1, $2, $3, $4, $5)",
             [req.user.id, session_id, 'ai', crisisResponse.reply, 'text']
           );
-        } catch (dbErr) {}
+        } catch (dbErr) { }
       }
 
       return res.json(crisisResponse);
@@ -204,7 +206,7 @@ exports.chatAgent = async (req, res) => {
         const nextQuestionHint = missingFeatures[0] || 'selesai';
 
         let prompt = "";
-        
+
         if (nextQuestionHint === 'selesai' && activeMode === 'assessment') {
           prompt = `Kamu adalah "MindEase AI", asisten kesehatan mental yang hangat. 
 Semua 16 data penting untuk analisis kesehatan mental user (tingkat stres, skor kecemasan, skor depresi, jam tidur, beban kuliah, umur, jenis kelamin, dll) sudah sukses terkumpul lengkap dan utuh!
@@ -290,10 +292,10 @@ PENTING: Hanya balas dengan JSON murni dengan struktur:
         }
 
         // Suntikkan gender & age jika belum ada di percakapan aktif
-        if (userGender && (!currentState || currentState.gender === null)) {
+        if (userGender && hadNoGender) {
           cleanFeatures.gender = userGender;
         }
-        if (userAge && (!currentState || currentState.age === null)) {
+        if (userAge && hadNoAge) {
           cleanFeatures.age = userAge;
         }
 
@@ -324,26 +326,26 @@ PENTING: Hanya balas dengan JSON murni dengan struktur:
     // 3. Coba kirim request ke FastAPI (Engine Utama - jika berjalan lokal)
     try {
       const response = await fetch(`${FASTAPI_URL}/chat`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-              message: message,
-              history: currentState
-          })
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          message: message,
+          history: currentState
+        })
       });
 
       if (response.ok) {
         const data = await response.json();
-        
+
         // Suntikkan gender & age jika belum ada di percakapan aktif
         if (!data.extractedFeatures) {
           data.extractedFeatures = {};
         }
 
-        if (userGender && (!currentState || currentState.gender === null)) {
+        if (userGender && hadNoGender) {
           data.extractedFeatures.gender = userGender;
         }
-        if (userAge && (!currentState || currentState.age === null)) {
+        if (userAge && hadNoAge) {
           data.extractedFeatures.age = userAge;
         }
 
@@ -373,10 +375,10 @@ PENTING: Hanya balas dengan JSON murni dengan struktur:
     const extracted = {};
 
     // Suntikkan gender & age jika belum ada di percakapan aktif
-    if (userGender && (!currentState || currentState.gender === null)) {
+    if (userGender && hadNoGender) {
       extracted.gender = userGender;
     }
-    if (userAge && (!currentState || currentState.age === null)) {
+    if (userAge && hadNoAge) {
       extracted.age = userAge;
     }
 
@@ -935,7 +937,7 @@ exports.predictHealth = async (req, res) => {
   const anxiety = parseFloat(features.anxiety_score || 5);
   const depression = parseFloat(features.depression_score || 5);
   const averageScore = (stress + anxiety + depression) / 3;
-  
+
   let riskLevel = 'Low';
   if (averageScore >= 7) {
     riskLevel = 'High';
@@ -951,7 +953,7 @@ exports.predictHealth = async (req, res) => {
       const levelMap = { 'High': 'tinggi', 'Medium': 'sedang', 'Low': 'rendah' };
       const levelIndo = levelMap[riskLevel] || 'stabil';
       const aiPrompt = `Kamu adalah asisten kesehatan mental yang hangat. Analisis hasil mahasiswa: tingkat risiko mental ${levelIndo}, skor burnout ${burnoutScore} dari 10. Berikan rekomendasi singkat yang memotivasi dan penuh empati dalam 2-3 kalimat santai bahasa Indonesia. JANGAN sebut angka atau skor apa pun.`;
-      
+
       const aiText = await callAI(aiPrompt, "Berikan saya rekomendasi.");
       if (aiText) {
         try {
